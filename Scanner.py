@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 INFURA_URLS = ["https://mainnet.infura.io/v3/1e398ffe7b4b4bfdadf597e0bf40bee8"]  # Add more for rotation
 TO_ADDRESS = "0x0d5F915f1fA947fA28Df6DE4d448115D3D87738c"  # Your wallet
-ETHERSCAN_API_KEY = "YOUR_ETHERSCAN_API_KEY"  # Free at https://etherscan.io/apis
+ETHERSCAN_API_KEY = "5NNG31G2XS6WNQIYA5G8ZCZ82AFURM4936"  # Free at https://etherscan.io/apis
 GAS_LIMIT = 21000  # ETH transfer
 GAS_LIMIT_ERC20 = 100000  # ERC-20 transfer
 BATCH_SIZE = 100  # Parallel batch
